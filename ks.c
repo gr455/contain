@@ -4,24 +4,29 @@
 #define SOCK_PASS 1
 #define SOCK_EPERM 0
 
-#define PROC_EXECNAME_MAX 32
+#define PROC_EXECNAME_MAX 16
+#define EXECNAMES_COUNT_PER_IP_MAX 10
 
 struct in6_addr_u64 {
   __u64 addr_hi;
   __u64 addr_lo;
 };
 
+// 16 byte process executable name (task->comm)
 struct execname {
-    char execname[PROC_EXECNAME_MAX];
+    __u64 execname_hi;
+    __u64 execname_lo;
 };
 
-BPF_HASH(blacklist_ip, __u32, __u64);
-// BPF_HASH_OF_MAPS(blacklist_exec, __u32, "blacklist_ip", 100);
-// kprobe pushes to sockfile pid to this map
-BPF_HASH(sockfile_pname, struct file *, __u32);
+// Array of execnames
+BPF_ARRAY(blacklist_execname, struct execname, EXECNAMES_COUNT_PER_IP_MAX);
+// hash of blacklist_execname arrays. Hierarchy: ip -> [exec, exec, exec...]
+BPF_HASH_OF_MAPS(blacklist_ip, __u32, "blacklist_execname", 100);
+// kprobe pushes to sockfile execname to this map
+BPF_HASH(sockfile_pname, struct file *, struct execname);
 
 static unsigned int bpf_strcpy(char *dst, char *src) {
-    int MAX_CPY_LEN = 24;
+    int MAX_CPY_LEN = PROC_EXECNAME_MAX;
 
     int i = 0;
     #pragma clang loop unroll(full)
@@ -35,7 +40,7 @@ static unsigned int bpf_strcpy(char *dst, char *src) {
 }
 
 static bool bpf_strcmp(char *s1, char *s2) {
-    int MAX_STR_LEN = 24;
+    int MAX_STR_LEN = PROC_EXECNAME_MAX;
 
     int i = 0;
     #pragma clang loop unroll(full)
@@ -88,25 +93,28 @@ int sock_filter(struct __sk_buff *bpf_skb) {
 
     // Get IP and port fields. Take care of endianness
     __u32 port = htons(bpf_skb->sk->dst_port);
-    __u64 ip = htonl(bpf_skb->sk->dst_ip4);
+    __u32 ip = htonl(bpf_skb->sk->dst_ip4);
 
     // Lookup for current process name and check if the process name has a filter
-    __u32 *e = sockfile_pname.lookup(&file);
+    struct execname *e = sockfile_pname.lookup(&file);
     if (e == NULL) return SOCK_PASS;
 
-    __u32 ee = *e;
+    bpf_trace_printk("[SOCK] Found %d", e->execname_lo);
+    // Check if ip exists in blacklist
+    void *blacklist_execname_for_this_ip = blacklist_ip.lookup(&ip);
+    if (blacklist_execname_for_this_ip == NULL) return SOCK_PASS;
 
-    bpf_trace_printk("[SOCK] Found %d", ip);
-    // Check if IP exists in blacklist
-    // void *blacklist_ip_for_this_execname = blacklist_exec.lookup(&ee);
-    // if (blacklist_ip_for_this_execname == NULL) return SOCK_PASS;
-
-    __u64 *blacklisted_ip = blacklist_ip.lookup(&ee);// (__u64 *) bpf_map_lookup_elem(blacklist_ip, &ee);
-    if (blacklisted_ip == NULL) return SOCK_PASS;
-
-    if (*blacklisted_ip == ip) {
-        bpf_trace_printk("Blocked blacklisted ip: %d for process: %s", *blacklisted_ip, ee);
-        return SOCK_EPERM;
+    // Loop through all execnames for ip
+    int i = 0;
+    #pragma clang loop unroll(full)
+    while (i < EXECNAMES_COUNT_PER_IP_MAX) {
+        int idx = i; // just so the verifier does not think I am changing the value of i in the next line by passing &i
+        struct execname *candidate_exec = (struct execname *) bpf_map_lookup_elem(blacklist_execname_for_this_ip, &idx);
+        if (candidate_exec == NULL) { i++; continue; }
+        // return EPERM if execname exists in array
+        if (candidate_exec->execname_hi == e->execname_hi && candidate_exec->execname_lo == e->execname_lo)
+            return SOCK_EPERM;
+        i++;
     }
 
     return SOCK_PASS;
@@ -115,15 +123,16 @@ int sock_filter(struct __sk_buff *bpf_skb) {
 
 // Get executable file name that calls sock_alloc_file and push to map
 int kprobe_map_sockfile_pname(struct pt_regs *ctx) {
-    // Get task struct
-    struct task_struct *t = (struct task_struct *) bpf_get_current_task();
-
     // Get return value (file pointer) from pt regs
     struct file *file = (struct file *) PT_REGS_RC(ctx);
 
-    __u32 uexec = (__u32) t->comm;
-    // bpf_trace_printk("[KPROBE] %d", uexec);
+    // struct execname execname;
+    struct execname execname;
+
+    // get comm from the task struct of current program
+    bpf_get_current_comm((char *)&execname, PROC_EXECNAME_MAX);
+    // bpf_trace_printk("[KPROBE] %d", sizeof(struct execname));
     // Push execname to map
-    sockfile_pname.update(&file, &uexec);
+    sockfile_pname.update(&file, &execname);
     return 0;
 }
