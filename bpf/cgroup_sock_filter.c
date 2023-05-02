@@ -131,7 +131,7 @@ int kprobe_map_sockfile_pname(struct pt_regs *ctx) {
 
     // get comm from the task struct of current program
     bpf_get_current_comm((char *)&execname, PROC_EXECNAME_MAX);
-    // bpf_trace_printk("[KPROBE] %d", sizeof(struct execname));
+    bpf_trace_printk("[KPROBE] %d", sizeof(struct execname));
     // Push execname to map
     sockfile_pname.update(&file, &execname);
     return 0;
