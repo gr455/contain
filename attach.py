@@ -7,14 +7,10 @@ import os
 ATTACH = 1
 DETACH = 0
 
-cgroup2_base = "/sys/fs/cgroup/system.slice/"
-containerid = "24503866ce77c6ee88b51f746a07ace1dc7cefc003fbf8125f3c4e36aaf575db"
-cgroup2_path = cgroup2_base + "docker-" + containerid + ".scope"
-
 filter_path = "./bpf/cgroup_sock_filter.c"
 
 # attach / detatch CGROUP_SKB program
-def sock(b, attach=ATTACH):
+def sock(b, cgroup2_path, attach=ATTACH):
     def detach_sock(fd, func):
         b.detach_func(func, fd, BPFAttachType.CGROUP_INET_EGRESS)
 
@@ -46,6 +42,9 @@ def getBPF():
     return b
 
 if __name__ == '__main__':
+    cgroup2_base = "/sys/fs/cgroup/system.slice/"
+    containerid = "24503866ce77c6ee88b51f746a07ace1dc7cefc003fbf8125f3c4e36aaf575db"
+    cgroup2_path = cgroup2_base + "docker-" + containerid + ".scope"
 
     b = getBPF()
 
@@ -53,10 +52,10 @@ if __name__ == '__main__':
 
     try:
         kprobe(b)
-        sock(b)
+        sock(b, cgroup2_path)
 
         b.trace_print()
     except KeyboardInterrupt:
         print("Detaching BPF handlers...")
-        sock(b, DETACH)
+        sock(b, cgroup2_path, DETACH)
         kprobe(b, DETACH)

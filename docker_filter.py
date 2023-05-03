@@ -37,6 +37,7 @@ def cli(i, n, d, action):
 		i = container.id
 
 	# container id exists now
+	cgroup2_path = "/sys/fs/cgroup/system.slice/" + "docker-" + i + ".scope"
 
 	# create bcc bpf object
 	b = attach.getBPF()
@@ -55,13 +56,13 @@ def cli(i, n, d, action):
 	if action == "attach":
 		info("Attaching handlers...")
 		attach.kprobe(b)
-		attach.sock(b)
+		attach.sock(b, cgroup2_path)
 		if not d:
 			try:
 				b.trace_print()
 			except KeyboardInterrupt:
 			 	info("Detatching...")
-			 	attach.sock(b, attach.DETACH)
+			 	attach.sock(b, cgroup2_path, attach.DETACH)
 			 	attach.kprobe(b, attach.DETACH)
 
 
