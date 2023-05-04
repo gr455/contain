@@ -1,6 +1,7 @@
 import attach
 import docker
 import click
+import json
 from bcc import BPF
 
 def log(level, message, color):
@@ -17,7 +18,8 @@ def info(message):
 @click.option("-n", type = str, help = "Pass container name")
 @click.option("-d", is_flag = True, help = "Detach trace print from terminal")
 @click.argument("action")
-def cli(i, n, d, action):
+@click.argument("blacklistfile")
+def cli(i, n, d, action, blacklistfile):
 	if not action:
 		fatal("No action passed")
 	if action != "attach" and action != "detach":
@@ -41,6 +43,17 @@ def cli(i, n, d, action):
 
 	# create bcc bpf object
 	b = attach.getBPF()
+	
+	disallowDict = {}
+
+	# read blacklist file
+	with open(blacklistfile, "r") as disallowFile:
+		disallowDict = json.load(disallowFile)
+	print(disallowDict)
+
+	# set disallow bpf hash
+	attach.setDisallowHash(b, disallowDict)
+	# return
 	# detach existing handlers
 	info("Detatching existing handlers...")
 	try:
