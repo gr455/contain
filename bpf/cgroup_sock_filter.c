@@ -6,6 +6,7 @@
 
 #define PROC_EXECNAME_MAX 16
 #define EXECNAMES_COUNT_PER_IP_MAX 10
+#define IP_COUNT_MAX 10
 
 struct in6_addr_u64 {
   __u64 addr_hi;
@@ -13,17 +14,17 @@ struct in6_addr_u64 {
 };
 
 // 16 byte process executable name (task->comm)
-struct execname {
+struct Execname {
     __u64 execname_hi;
     __u64 execname_lo;
 };
 
 // Array of execnames
-BPF_ARRAY(blacklist_execname, struct execname, EXECNAMES_COUNT_PER_IP_MAX);
+BPF_ARRAY(blacklist_execname, struct Execname, EXECNAMES_COUNT_PER_IP_MAX * IP_COUNT_MAX);
 // hash of blacklist_execname arrays. Hierarchy: ip -> [exec, exec, exec...]
-BPF_HASH_OF_MAPS(blacklist_ip, __u32, "blacklist_execname", 100);
+BPF_HASH(blacklist_ip, __u32, __u32, IP_COUNT_MAX);
 // kprobe pushes to sockfile execname to this map
-BPF_HASH(sockfile_pname, struct file *, struct execname);
+BPF_HASH(sockfile_pname, struct file *, struct Execname);
 
 static unsigned int bpf_strcpy(char *dst, char *src) {
     int MAX_CPY_LEN = PROC_EXECNAME_MAX;
@@ -96,20 +97,21 @@ int sock_filter(struct __sk_buff *bpf_skb) {
     __u32 ip = htonl(bpf_skb->sk->dst_ip4);
 
     // Lookup for current process name and check if the process name has a filter
-    struct execname *e = sockfile_pname.lookup(&file);
+    struct Execname *e = sockfile_pname.lookup(&file);
     if (e == NULL) return SOCK_PASS;
 
-    bpf_trace_printk("[SOCK] Found %d", e->execname_lo);
+    bpf_trace_printk("[SOCK] Found %d, %d", e->execname_hi, ip);
     // Check if ip exists in blacklist
-    void *blacklist_execname_for_this_ip = blacklist_ip.lookup(&ip);
-    if (blacklist_execname_for_this_ip == NULL) return SOCK_PASS;
+    __u32 *execname_idx = blacklist_ip.lookup(&ip);
+    if (execname_idx == NULL) return SOCK_PASS;
 
+    bpf_trace_printk("[SOCK] BLOCKABLE Found %d, %d", e->execname_hi, ip);
     // Loop through all execnames for ip
     int i = 0;
     #pragma clang loop unroll(full)
     while (i < EXECNAMES_COUNT_PER_IP_MAX) {
-        int idx = i; // just so the verifier does not think I am changing the value of i in the next line by passing &i
-        struct execname *candidate_exec = (struct execname *) bpf_map_lookup_elem(blacklist_execname_for_this_ip, &idx);
+        int idx = *execname_idx * EXECNAMES_COUNT_PER_IP_MAX + i;
+        struct Execname *candidate_exec = (struct Execname *) blacklist_execname.lookup(&idx);
         if (candidate_exec == NULL) { i++; continue; }
         // return EPERM if execname exists in array
         if (candidate_exec->execname_hi == e->execname_hi && candidate_exec->execname_lo == e->execname_lo)
@@ -126,12 +128,14 @@ int kprobe_map_sockfile_pname(struct pt_regs *ctx) {
     // Get return value (file pointer) from pt regs
     struct file *file = (struct file *) PT_REGS_RC(ctx);
 
-    // struct execname execname;
-    struct execname execname;
+    // struct Execname execname;
+    struct Execname execname;
+    execname.execname_lo = 0;
+    execname.execname_hi = 0;
 
     // get comm from the task struct of current program
     bpf_get_current_comm((char *)&execname, PROC_EXECNAME_MAX);
-    bpf_trace_printk("[KPROBE] %d", sizeof(struct execname));
+    bpf_trace_printk("[KPROBE] %d", sizeof(struct Execname));
     // Push execname to map
     sockfile_pname.update(&file, &execname);
     return 0;
