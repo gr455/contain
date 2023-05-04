@@ -3,4 +3,5 @@
 		"process": "curl",
 		"disallow_ips": ["192.168.0.1", "1.1.1.1"]
 	}
+
 ]
