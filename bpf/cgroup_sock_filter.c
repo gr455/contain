@@ -100,12 +100,11 @@ int sock_filter(struct __sk_buff *bpf_skb) {
     struct Execname *e = sockfile_pname.lookup(&file);
     if (e == NULL) return SOCK_PASS;
 
-    bpf_trace_printk("[SOCK] Found %d, %d", e->execname_hi, ip);
+    // bpf_trace_printk("[SOCK] Found %d, %d", e->execname_hi, ip);
     // Check if ip exists in blacklist
     __u32 *execname_idx = blacklist_ip.lookup(&ip);
     if (execname_idx == NULL) return SOCK_PASS;
 
-    bpf_trace_printk("[SOCK] BLOCKABLE Found %d, %d", e->execname_hi, ip);
     // Loop through all execnames for ip
     int i = 0;
     #pragma clang loop unroll(full)
@@ -114,8 +113,14 @@ int sock_filter(struct __sk_buff *bpf_skb) {
         struct Execname *candidate_exec = (struct Execname *) blacklist_execname.lookup(&idx);
         if (candidate_exec == NULL) { i++; continue; }
         // return EPERM if execname exists in array
-        if (candidate_exec->execname_hi == e->execname_hi && candidate_exec->execname_lo == e->execname_lo)
+        if (candidate_exec->execname_hi == e->execname_hi && candidate_exec->execname_lo == e->execname_lo){
+            int ip_1 = (ip >> 24) & 0xFF;
+            int ip_2 = (ip >> 16) & 0xFF;
+            int ip_3 = (ip >> 8) & 0xFF;
+            int ip_4 = ip & 0xFF;
+            bpf_trace_printk("[SOCK] Blocked connection to %d, for %s%s", ip, &e->execname_hi, &e->execname_lo);
             return SOCK_EPERM;
+        }
         i++;
     }
 
@@ -135,7 +140,7 @@ int kprobe_map_sockfile_pname(struct pt_regs *ctx) {
 
     // get comm from the task struct of current program
     bpf_get_current_comm((char *)&execname, PROC_EXECNAME_MAX);
-    bpf_trace_printk("[KPROBE] %d", sizeof(struct Execname));
+    // bpf_trace_printk("[KPROBE] %d", sizeof(struct Execname));
     // Push execname to map
     sockfile_pname.update(&file, &execname);
     return 0;
