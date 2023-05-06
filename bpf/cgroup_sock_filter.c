@@ -5,8 +5,10 @@
 #define SOCK_EPERM 0
 
 #define PROC_EXECNAME_MAX 16
-#define EXECNAMES_COUNT_PER_IP_MAX 10
-#define IP_COUNT_MAX 10
+#define EXECNAMES_COUNT_MAX 10
+#define IP_COUNT_PER_EXECNAME_MAX 10
+#define PORT_COUNT_PER_IP_MAX 5
+#define TOTSIZE ( EXECNAMES_COUNT_MAX * IP_COUNT_PER_EXECNAME_MAX * PORT_COUNT_PER_IP_MAX )
 
 struct in6_addr_u64 {
   __u64 addr_hi;
@@ -20,9 +22,14 @@ struct Execname {
 };
 
 // Array of execnames
-BPF_ARRAY(blacklist_execname, struct Execname, EXECNAMES_COUNT_PER_IP_MAX * IP_COUNT_MAX);
-// hash of blacklist_execname arrays. Hierarchy: ip -> [exec, exec, exec...]
-BPF_HASH(blacklist_ip, __u32, __u32, IP_COUNT_MAX);
+BPF_ARRAY(blacklist_execname, struct Execname, TOTSIZE);
+// Array of ips
+BPF_ARRAY(blacklist_ip, __u32, TOTSIZE);
+// Array of CIDRs
+BPF_ARRAY(blacklist_cidr_for_ip, __u32, TOTSIZE);
+// Array of ports
+BPF_ARRAY(blacklist_port_for_ip, __u32, TOTSIZE);
+
 // kprobe pushes to sockfile execname to this map
 BPF_HASH(sockfile_pname, struct file *, struct Execname);
 
@@ -53,6 +60,10 @@ static bool bpf_strcmp(char *s1, char *s2) {
 
     return true;
 
+}
+
+static bool ip_in_net(__u32 candidate_ip, __u32 net_ip, __u32 cidr4_mask) {
+    return ((candidate_ip >> (32 - cidr4_mask)) == (net_ip >> (32 - cidr4_mask)));
 }
 
 // Socket filter BPF program
@@ -100,26 +111,32 @@ int sock_filter(struct __sk_buff *bpf_skb) {
     struct Execname *e = sockfile_pname.lookup(&file);
     if (e == NULL) return SOCK_PASS;
 
-    // bpf_trace_printk("[SOCK] Found %d, %d", e->execname_hi, ip);
-    // Check if ip exists in blacklist
-    __u32 *execname_idx = blacklist_ip.lookup(&ip);
-    if (execname_idx == NULL) return SOCK_PASS;
 
-    // Loop through all execnames for ip
+    // Check for match in arrays
     int i = 0;
     #pragma clang loop unroll(full)
-    while (i < EXECNAMES_COUNT_PER_IP_MAX) {
-        int idx = *execname_idx * EXECNAMES_COUNT_PER_IP_MAX + i;
+    while (i < TOTSIZE) {
+        int idx = i;
         struct Execname *candidate_exec = (struct Execname *) blacklist_execname.lookup(&idx);
         if (candidate_exec == NULL) { i++; continue; }
-        // return EPERM if execname exists in array
+
         if (candidate_exec->execname_hi == e->execname_hi && candidate_exec->execname_lo == e->execname_lo){
-            int ip_1 = (ip >> 24) & 0xFF;
-            int ip_2 = (ip >> 16) & 0xFF;
-            int ip_3 = (ip >> 8) & 0xFF;
-            int ip_4 = ip & 0xFF;
-            bpf_trace_printk("[SOCK] Blocked connection to %d, for %s%s", ip, &e->execname_hi, &e->execname_lo);
-            return SOCK_EPERM;
+            // Found execname, check ip4 cidr
+            __u32 *bl_ip = blacklist_ip.lookup(&idx);
+            __u32 *cidr4_mask = blacklist_cidr_for_ip.lookup(&idx);
+            if (bl_ip == NULL || cidr4_mask == NULL) { i++; continue; }
+
+            if (ip_in_net(ip, *bl_ip, *cidr4_mask)) {
+                // IP found, check port
+                __u32 *bl_port = blacklist_port_for_ip.lookup(&idx);
+                if (bl_port == NULL) { i++; continue; }
+
+                if (*bl_port == port) {
+                    // Matched
+                    bpf_trace_printk("BLOCKED for %s%s connection to %d", &candidate_exec->execname_hi, &candidate_exec->execname_lo, ip);
+                    return SOCK_EPERM;
+                }
+            }
         }
         i++;
     }

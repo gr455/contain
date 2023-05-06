@@ -9,15 +9,20 @@ import bcc
 ATTACH = 1
 DETACH = 0
 
-EXECNAMES_COUNT_PER_IP_MAX = 10
+PROC_EXECNAME_MAX = 16
+EXECNAMES_COUNT_MAX = 10
+IP_COUNT_PER_EXECNAME_MAX = 10
+PORT_COUNT_PER_IP_MAX = 5
+TOTSIZE = ( EXECNAMES_COUNT_MAX * IP_COUNT_PER_EXECNAME_MAX * PORT_COUNT_PER_IP_MAX )
 
-DISALLOW_IP_HASHNAME = "blacklist_ip"
-DISALLOW_EXEC_ARRAYNAME = "blacklist_execname"
+
+IP_HASHNAME = "blacklist_ip"
+EXEC_ARRAYNAME = "blacklist_execname"
+CIDR_ARRAYNAME = "blacklist_cidr_for_ip"
+PORT_ARRAYNAME = "blacklist_port_for_ip"
 
 filter_path = "./bpf/cgroup_sock_filter.c"
 
-class TooManyDisallowedIPsException:
-    pass
 
 class ExecName:
     def __init__(self, execname_hi, execname_lo):
@@ -58,61 +63,56 @@ def getBPF():
     b = BPF(text=program)
     return b
 
-def setDisallowHash(b, disallowDict):
-    # ExecName = type(b[DISALLOW_HASH_OF_MAPS_NAME][0])
-    disallowDict = createInverseDict(disallowDict)
-    disallowDict = formatDict(disallowDict)
-
-    deArray = b.get_table(DISALLOW_EXEC_ARRAYNAME)
-    disallowDict = makeExecNameStructInDict(deArray.Leaf, disallowDict)
+def setDisallowHash(b, policyDict):
+    blacklistExecname, blacklistIP, blacklistCIDRForIP, blacklistPortForIP = formatDictToArrays(policyDict)
+    blacklistExecname = execnameArrayStringToObject(blacklistExecname, b['blacklist_execname'].Leaf)
+    blacklistIP = ipArrayStringToInt(blacklistIP)
 
     # print(type(b[DISALLOW_IP_HASHNAME]))
-    # print(disallowDict)
+    # print(policyDict)
+    for i in range(len(blacklistExecname)):
+        b[EXEC_ARRAYNAME][i] = blacklistExecname[i]
+        b[IP_HASHNAME][i] = blacklistIP[i]
+        b[CIDR_ARRAYNAME][i] = blacklistCIDRForIP[i]
+        b[PORT_ARRAYNAME][i] = blacklistPortForIP[i]
 
-    ki = -1
-    for k, v in disallowDict.items():
-        ki += 1
-        if len(v) > EXECNAMES_COUNT_PER_IP_MAX:
-            raise TooManyDisallowedIPsException
-        b[DISALLOW_IP_HASHNAME][ctypes.c_uint32(k)] = ctypes.c_uint32(ki)
-        for vi in range(len(v)):
-            idx = ki * EXECNAMES_COUNT_PER_IP_MAX + vi
-            b[DISALLOW_EXEC_ARRAYNAME][ctypes.c_uint32(idx)] = v[vi]
     
 
-def createInverseDict(disallowDict):
-    inverseDict = {}
-    for item in disallowDict:
-        for ip in item["disallow_ips"]:
-            if ip not in inverseDict.keys():
-                inverseDict[ip] = []
-            inverseDict[ip].append(item["process"])
+def formatDictToArrays(policyDict):
+    blacklistExecname = []
+    blacklistIP = []
+    blacklistCIDRForIP = []
+    blacklistPortForIP = []
 
-    return inverseDict
+    for process in policyDict:
+        for ipPolicy in process['disallow']:
+            for port in ipPolicy['ports']:
+                blacklistExecname.append(process['process'])
+                blacklistIP.append(ipPolicy['cidr4'].split('/')[0])
+                blacklistCIDRForIP.append(ctypes.c_uint32(int(ipPolicy['cidr4'].split('/')[1])))
+                blacklistPortForIP.append(ctypes.c_uint32(port))
 
-def formatDict(stringIpDict):
-    formattedDict = {}
-    for k, v in stringIpDict.items():
-        ipInt = int(ipaddress.IPv4Address(k))
-        formattedDict[ipInt] = v
+    return (blacklistExecname, blacklistIP, blacklistCIDRForIP, blacklistPortForIP)
 
-    return formattedDict
+def ipArrayStringToInt(blacklistIP):
+    for i in range(len(blacklistIP)):
+        blacklistIP[i] = ctypes.c_uint32(int(ipaddress.IPv4Address(blacklistIP[i])))
+    return blacklistIP
 
-def makeExecNameStructInDict(ExecNameClass, disallowDict):
-    def execStringToExecName(execString):
-        if len(execString) > 16:
-            execString = execString[:16]
+def execnameArrayStringToObject(blacklistExecname, ExecNameClass):
+    for i in range(len(blacklistExecname)):
+        blacklistExecname[i] = execStringToExecName(blacklistExecname[i], ExecNameClass)
+    return blacklistExecname
 
-        hi = int.from_bytes((bytes(execString, 'utf-8') + b"\0" * (16 - len(execString)))[:8], "little", signed = True)
-        lo = int.from_bytes((bytes(execString, 'utf-8') + b"\0" * (16 - len(execString)))[8:], "little", signed = True)
+def execStringToExecName(execString, ExecNameClass):
+    if len(execString) > 16:
+        execString = execString[:16]
 
-        return ExecNameClass(hi, lo)
+    hi = int.from_bytes((bytes(execString, 'utf-8') + b"\0" * (16 - len(execString)))[:8], "little", signed = True)
+    lo = int.from_bytes((bytes(execString, 'utf-8') + b"\0" * (16 - len(execString)))[8:], "little", signed = True)
 
-    for k, v in disallowDict.items():
-        for i in range(len(disallowDict[k])):
-            disallowDict[k][i] = execStringToExecName(disallowDict[k][i])
+    return ExecNameClass(hi, lo)
 
-    return disallowDict
 
 if __name__ == '__main__':
     cgroup2_base = "/sys/fs/cgroup/system.slice/"
