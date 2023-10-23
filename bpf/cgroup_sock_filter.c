@@ -11,11 +11,11 @@
 #define TOTSIZE ( EXECNAMES_COUNT_MAX * IP_COUNT_PER_EXECNAME_MAX * PORT_COUNT_PER_IP_MAX )
 
 struct in6_addr_u64 {
-  __u64 addr_hi;
-  __u64 addr_lo;
+    __u64 addr_hi;
+    __u64 addr_lo;
 };
 
-// 16 byte process executable name (task->comm)
+// 16 byte process executable name (comm)
 struct Execname {
     __u64 execname_hi;
     __u64 execname_lo;
