@@ -19,12 +19,10 @@ def kprobe(b, attach=ATTACH):
 		b.detach_kprobe(event="veth_newlink", fn_name="trace__veth_newlink")
 		b.detach_kprobe(event="register_netdevice", fn_name="trace__register_netdevice")
 		b.detach_kretprobe(event="register_netdevice", fn_name="traceret__register_netdevice")
-		b.detach_kprobe(event="__dev_change_net_namespace", fn_name="trace__dev_change_net_namespace")
 	def attach_kpr():
 		b.attach_kprobe(event="veth_newlink", fn_name="trace__veth_newlink")
 		b.attach_kprobe(event="register_netdevice", fn_name="trace__register_netdevice")
 		b.attach_kretprobe(event="register_netdevice", fn_name="traceret__register_netdevice")
-		b.attach_kprobe(event="__dev_change_net_namespace", fn_name="trace__dev_change_net_namespace")
 
 
 	if attach: attach_kpr()
