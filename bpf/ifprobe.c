@@ -1,9 +1,12 @@
 #include <linux/netdevice.h>
+#include <linux/ns_common.h>
+#include <net/net_namespace.h>
+#include <linux/proc_ns.h>
 
 #define COMM_MAX 16
 
 #define STATE_NEWLINK 0
-#define STATE_REGISTERING_SELF 1
+#define STATE_REGISTERING_HOST 1
 #define STATE_REGISTERING_PEER 2
 
 /**
@@ -26,6 +29,12 @@
  *  - Traces creation of veth link
  *  - Stores the reference to netdevice struct with kprobe to register_netdevice()
  *  - Reads ifindex from netdevice with kretprobe to register_netdevice()
+ *  - Traces the moving of the device corresponding to one of the veths to the
+ *    container namespace
+ *  - Reads the container namespace
+ * 
+ * 
+ * Refer https://github.com/Gui774ume/network-security-probe 
  * 
  * */
 
@@ -50,7 +59,13 @@ struct netdevice_ifindex_t {
     int state;
 };
 
+struct net_namespace_t {
+    struct net *net;
+};
+
 BPF_HASH(pid_to_peer_netdevice_ifindex, __u64, struct netdevice_ifindex_t);
+BPF_HASH(ifindex_to_net_namespace, int, struct net_namespace_t);
+
 
 // Initialize netdevice_ifindex struct for pid. Verifies that veth pairs
 // were created by dockerd.
@@ -91,15 +106,14 @@ static int do_trace__register_netdevice(struct net_device *dev) {
 
     switch (netdevice_ifindex->state) {
 
-    // Veths were newly created, self registration will happen first. This device is SELF
+    // Veths were newly created, peer registration will happen first. This device is PEER
     case STATE_NEWLINK:
-        netdevice_ifindex->state = STATE_REGISTERING_SELF;
-        netdevice_ifindex->dev = dev;
-        break;
-    // Self registration has completed for veth pair, peer registration now. This device is PEER
-    case STATE_REGISTERING_LINK:
         netdevice_ifindex->state = STATE_REGISTERING_PEER;
         netdevice_ifindex->dev = dev;
+        break;
+    // Peer registration has completed for veth pair, host registration now. This device is HOST
+    case STATE_REGISTERING_PEER:
+        netdevice_ifindex->state = STATE_REGISTERING_HOST;
         break;
     default:
         return 1;
@@ -109,7 +123,6 @@ static int do_trace__register_netdevice(struct net_device *dev) {
     return 0;
 }
 
-
 // Before register_netdevice returns, we should have the populated netdevice. Extract the
 // ifindex from it.
 static int doret_trace__register_netdevice(struct pt_regs *ctx, int ret) {
@@ -117,42 +130,97 @@ static int doret_trace__register_netdevice(struct pt_regs *ctx, int ret) {
     // If registration was unsuccessful, fail.
     // if (ret != 0) return 1;
 
-    bpf_trace_printk("[INFO] return ok");
+    bpf_trace_printk("    [INFO] return ok");
 
     __u64 pid = bpf_get_current_pid_tgid();
 
     struct netdevice_ifindex_t *netdevice_ifindex = pid_to_peer_netdevice_ifindex.lookup(&pid);
     if (netdevice_ifindex == NULL) return 1;
 
-    bpf_trace_printk("[INFO] netdevice_ifindex ok");
+    bpf_trace_printk("    [INFO] netdevice_ifindex ok");
 
     // If this registration is not for the peer device, return
     if (netdevice_ifindex->state != STATE_REGISTERING_PEER) return 0;
+
+    bpf_trace_printk("    [INFO] netdevice is PEER");
 
     if (netdevice_ifindex->dev == NULL) return 1;
 
     // Set ifindex
     int ifindex = netdevice_ifindex->dev->ifindex;
 
-    bpf_trace_printk("IFINDEX: %d", ifindex);
+    bpf_trace_printk("    [INFO] IFINDEX: %d", ifindex);
+
+    // Initialize nsmap with ifindex key
+    struct net_namespace_t netns = { .net = NULL };
+    ifindex_to_net_namespace.update(&ifindex, &netns);
+
+    return 0;
+}
+
+// When the device corresponding to one of the veth pairs switches namespaces into the
+// container namespace, find its final namespace.
+static int do_trace__dev_change_net_namespace(struct net_device *dev, struct net *net) {
+    bpf_trace_printk("[CALL] do_trace__dev_change_net_namespace");
+
+    if (dev == NULL) return 1;
+
+    bpf_trace_printk("    [INFO] dev ok");
+
+    bpf_trace_printk("    [INFO] HELLO");
+    int ifindex = dev->ifindex;
+    bpf_trace_printk("    [INFO] YES");
+
+    bpf_trace_printk("    [INFO] IFINDEX: %d", ifindex);
+
+    struct net_namespace_t *net_ns = ifindex_to_net_namespace.lookup(&ifindex);
+
+    // Device is not in table, probably not related to a container
+    if (net_ns == NULL) return 0;
+
+    net_ns->net = net;
+
+    bpf_trace_printk("    [INFO] INUM: %d", net->ns.inum);
+    
+    return 0;
+}
+
+
+// Add ifindices for devices that get unregistered to unregister queue
+static int do_trace__unregister_netdevice_queue(struct net_device *dev) {
+
 
     return 0;
 }
 
 
 int trace__veth_newlink(struct pt_regs *ctx) {
-
     struct net_device *dev = (struct net_device *) PT_REGS_PARM2(ctx);
+
     return do_trace__veth_newlink(dev);
 }
 
 int trace__register_netdevice(struct pt_regs *ctx) {
-    struct net_device *dev = (struct net_device *)PT_REGS_PARM1(ctx);
+    struct net_device *dev = (struct net_device *) PT_REGS_PARM1(ctx);
+
     return do_trace__register_netdevice(dev);
 }
 
 int traceret__register_netdevice(struct pt_regs *ctx) {
-
     int ret = PT_REGS_RET(ctx);
+
     return doret_trace__register_netdevice(ctx, ret);
+}
+
+int trace__dev_change_net_namespace(struct pt_regs *ctx) {
+    struct net_device *dev = (struct net_device *) PT_REGS_PARM1(ctx);
+    struct net *net = (struct net *) PT_REGS_PARM2(ctx);
+
+    return do_trace__dev_change_net_namespace(dev, net);
+}
+
+int trace__unregister_netdevice_queue(struct pt_regs *ctx) {
+    struct net_device *dev = (struct net_device *) PT_REGS_PARM1(ctx);
+
+    return do_trace__unregister_netdevice_queue(dev);
 }
