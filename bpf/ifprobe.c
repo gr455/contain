@@ -4,11 +4,20 @@
 #include <linux/proc_ns.h>
 
 #define COMM_MAX 16
-#define NETNS_QSIZE 100
+#define IFIDX_QSIZE 100
 
 #define STATE_NEWLINK 0
 #define STATE_REGISTERING_HOST 1
 #define STATE_REGISTERING_PEER 2
+#define STATE_UNREGING_HOST 3
+#define STATE_UNREGING_PEER 4
+
+#define ERR_GENERIC 1
+#define ERR_MAP_UPDATE_FAIL 2
+#define ERR_MAP_LOOKUP_FAIL 3
+#define ERR_ILLEGAL_STATE 4
+#define ERR_UNEXPECTED_NULL 5
+
 
 /**
  * 
@@ -63,8 +72,8 @@ struct netdevice_ifindex_t {
 
 BPF_HASH(pid_to_peer_netdevice_ifindex, __u64, struct netdevice_ifindex_t);
 
-BPF_QUEUE(peer_ifindex_upq, int, NETNS_QSIZE);
-BPF_QUEUE(peer_ifindex_dwnq, int, NETNS_QSIZE);
+BPF_QUEUE(peer_ifindex_upq, int, IFIDX_QSIZE);
+BPF_QUEUE(peer_ifindex_dwnq, int, IFIDX_QSIZE);
 
 // Initialize netdevice_ifindex struct for pid. Verifies that veth pairs
 // were created by dockerd.
@@ -87,7 +96,7 @@ static int do_trace__veth_newlink(struct net_device *dev) {
         .state = STATE_NEWLINK,
     };
 
-    pid_to_peer_netdevice_ifindex.update(&pid, &netdevice_ifindex);
+    if (pid_to_peer_netdevice_ifindex.update(&pid, &netdevice_ifindex) != 0) return ERR_MAP_UPDATE_FAIL;
 
     return 0;
 }
@@ -115,7 +124,7 @@ static int do_trace__register_netdevice(struct net_device *dev) {
         netdevice_ifindex->state = STATE_REGISTERING_HOST;
         break;
     default:
-        return 1;
+        return ERR_ILLEGAL_STATE;
     }
 
 
@@ -127,12 +136,12 @@ static int do_trace__register_netdevice(struct net_device *dev) {
 static int doret_trace__register_netdevice(struct pt_regs *ctx, int ret) {
     bpf_trace_printk("[CALL] doret_trace__register_netdevice");
     // If registration was unsuccessful, fail.
-    // if (ret != 0) return 1;
+    // if (ret != 0) return ERR_GENERIC;
 
     __u64 pid = bpf_get_current_pid_tgid();
 
     struct netdevice_ifindex_t *netdevice_ifindex = pid_to_peer_netdevice_ifindex.lookup(&pid);
-    if (netdevice_ifindex == NULL) return 1;
+    if (netdevice_ifindex == NULL) return ERR_MAP_LOOKUP_FAIL;
 
     // If this registration state is not peer, remove the device from
     // map. (since this is host registration, this device has been
@@ -145,7 +154,7 @@ static int doret_trace__register_netdevice(struct pt_regs *ctx, int ret) {
 
     bpf_trace_printk("    [INFO] netdevice is PEER");
 
-    if (netdevice_ifindex->dev == NULL) return 1;
+    if (netdevice_ifindex->dev == NULL) return ERR_UNEXPECTED_NULL;
 
     // Set ifindex
     int ifindex = netdevice_ifindex->dev->ifindex;
@@ -153,15 +162,50 @@ static int doret_trace__register_netdevice(struct pt_regs *ctx, int ret) {
     bpf_trace_printk("    [INFO] IFINDEX: %d", ifindex);
 
     // Push the ifindex to upq
-    peer_ifindex_upq.push(&ifindex, BPF_EXIST);
+    if (peer_ifindex_upq.push(&ifindex, BPF_EXIST) != 0) return ERR_MAP_UPDATE_FAIL;
 
     return 0;
 }
 
 
-// Add ifindices for devices that get unregistered to unregister queue
+// Add ifindices for devices that get unregistered to dwnq
 static int do_trace__unregister_netdevice_queue(struct net_device *dev) {
+    bpf_trace_printk("[CALL] do_trace__unregister_netdevice_queue");
+    // Verify that unregister was called by dockerd
+    char comm[COMM_MAX];
+    bpf_get_current_comm(comm, COMM_MAX);
 
+    if (!bpf_strcmp_comm(comm, "dockerd\0")) return 0;
+
+    __u64 pid = bpf_get_current_pid_tgid();
+
+    int ifindex = dev->ifindex;
+
+    // Verify state
+    struct netdevice_ifindex_t *netdevice_ifindex = pid_to_peer_netdevice_ifindex.lookup(&pid);
+
+    // New device, unregistering peer
+    if (netdevice_ifindex == NULL) {
+        bpf_trace_printk("    [INFO] : netdevice is PEER");
+        struct netdevice_ifindex_t netdevice_ifindex = {
+            .dev = dev,
+            .ifindex = ifindex,
+            .state = STATE_UNREGING_PEER,
+        };
+
+        // Push the state
+        if (pid_to_peer_netdevice_ifindex.update(&pid, &netdevice_ifindex) != 0) return ERR_MAP_UPDATE_FAIL;
+
+        bpf_trace_printk("    [INFO] IFINDEX: %d", ifindex);
+        
+        // push to dwnq 
+        if (peer_ifindex_dwnq.push(&ifindex, BPF_EXIST) != 0) return ERR_MAP_UPDATE_FAIL;
+
+    } else if (netdevice_ifindex->state == STATE_UNREGING_HOST) {
+        return 0;
+    } else {
+        return ERR_ILLEGAL_STATE;
+    }
 
     return 0;
 }
