@@ -18,6 +18,9 @@
 #define ERR_ILLEGAL_STATE 4
 #define ERR_UNEXPECTED_NULL 5
 
+#define EVENT_STATE_DOWN 0
+#define EVENT_STATE_UP 1
+
 
 /**
  * 
@@ -39,14 +42,30 @@
  *  - Traces creation of veth link
  *  - Stores the reference to netdevice struct with kprobe to register_netdevice()
  *  - Reads ifindex from netdevice with kretprobe to register_netdevice()
- *  - Traces the moving of the device corresponding to one of the veths to the
- *    container namespace
- *  - Reads the container namespace
+ *  - Also traces device unregistration and pushes the relevent ifindex to down queue
  * 
  * 
  * Refer https://github.com/Gui774ume/network-security-probe 
  * 
  * */
+
+struct netdevice_ifindex_t {
+    struct net_device *dev;
+    int ifindex;
+    int state;
+};
+
+// Event for adding to eventq. EVENT_STATE_UP says netdevice was registered
+// EVENT_STATE_DOWN says the netdevice was unregistered
+struct netdevice_event_t {
+    int ifindex;
+    int event_state;
+
+};
+
+BPF_HASH(pid_to_peer_netdevice_ifindex, __u64, struct netdevice_ifindex_t);
+
+BPF_QUEUE(peer_ifindex_evtq, struct netdevice_event_t, IFIDX_QSIZE);
 
 static bool bpf_strcmp_comm(char *s1, char *s2) {
     int MAX_STR_LEN = COMM_MAX;
@@ -62,18 +81,6 @@ static bool bpf_strcmp_comm(char *s1, char *s2) {
     return true;
 
 }
-
-struct netdevice_ifindex_t {
-    struct net_device *dev;
-    int ifindex;
-    int state;
-};
-
-
-BPF_HASH(pid_to_peer_netdevice_ifindex, __u64, struct netdevice_ifindex_t);
-
-BPF_QUEUE(peer_ifindex_upq, int, IFIDX_QSIZE);
-BPF_QUEUE(peer_ifindex_dwnq, int, IFIDX_QSIZE);
 
 // Initialize netdevice_ifindex struct for pid. Verifies that veth pairs
 // were created by dockerd.
@@ -161,14 +168,19 @@ static int doret_trace__register_netdevice(struct pt_regs *ctx, int ret) {
 
     bpf_trace_printk("    [INFO] IFINDEX: %d", ifindex);
 
-    // Push the ifindex to upq
-    if (peer_ifindex_upq.push(&ifindex, BPF_EXIST) != 0) return ERR_MAP_UPDATE_FAIL;
+    // push to evtq
+    struct netdevice_event_t netdevice_event = {
+        .ifindex = ifindex, // placeholder
+        .event_state = EVENT_STATE_UP,
+    };
+
+    if (peer_ifindex_evtq.push(&netdevice_event, BPF_EXIST) != 0) return ERR_MAP_UPDATE_FAIL;
 
     return 0;
 }
 
 
-// Add ifindices for devices that get unregistered to dwnq
+// Add ifindices for devices that get unregistered to evtq
 static int do_trace__unregister_netdevice_queue(struct net_device *dev) {
     bpf_trace_printk("[CALL] do_trace__unregister_netdevice_queue");
     // Verify that unregister was called by dockerd
@@ -198,8 +210,13 @@ static int do_trace__unregister_netdevice_queue(struct net_device *dev) {
 
         bpf_trace_printk("    [INFO] IFINDEX: %d", ifindex);
         
-        // push to dwnq 
-        if (peer_ifindex_dwnq.push(&ifindex, BPF_EXIST) != 0) return ERR_MAP_UPDATE_FAIL;
+        // push to evtq
+        struct netdevice_event_t netdevice_event = {
+            .ifindex = ifindex, // placeholder
+            .event_state = EVENT_STATE_DOWN,
+        };
+
+        if (peer_ifindex_evtq.push(&netdevice_event, BPF_EXIST) != 0) return ERR_MAP_UPDATE_FAIL;
 
     } else if (netdevice_ifindex->state == STATE_UNREGING_HOST) {
         return 0;
