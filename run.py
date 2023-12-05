@@ -24,7 +24,11 @@ def get_cgroup2_path(container_id):
 
 	return cgroup2_path
 
+# Maps container id to bpf object
 glob_cid_to_bpf_obj_map = {}
+# Maps ifindex to container id. Required for detaching since then the container is not running 
+# and so, ifindex does not exist in kernel
+glob_ifindex_to_cid_map = {}
 
 # Attaches ifprobes to track new containers through ifindexes in upq
 def do_attach_monitor_ifprobe(ifprobe_bpf):
@@ -58,6 +62,10 @@ def get_ifindex_for_container(container_id):
 	return op
 
 def get_container_id_for_ifindex(ifindex):
+	# If ifindex already exists with us, return it
+	if ifindex in glob_ifindex_to_cid_map.keys():
+		return glob_ifindex_to_cid_map[ifindex]
+
 	# Get all running containers
 	client = docker.from_env()
 
@@ -67,6 +75,8 @@ def get_container_id_for_ifindex(ifindex):
 		try:
 			this_ifindex = int(get_ifindex_for_container(cid))
 			if this_ifindex == ifindex:
+				# Cache and return
+				glob_ifindex_to_cid_map[ifindex] = cid
 				return cid
 		except NonFatalExternalScriptException:
 			pass
@@ -82,12 +92,13 @@ def attach_sock_filter_or_not(ifindex):
 	# If container not in the policy, ignore
 	if check_ignore_container(container_id):
 		return
-
 	
 	container_cgroup2_path = get_cgroup2_path(container_id)
 	bpf = attach.getBPF()
 
 	glob_cid_to_bpf_obj_map[container_id] = bpf
+
+	print(f"attaching bpf for {container_id}")
 
 	try:
 		attach.kprobe(bpf)
@@ -99,14 +110,28 @@ def attach_sock_filter_or_not(ifindex):
 def detach_sock_filter(ifindex):
 	container_id = get_container_id_for_ifindex(ifindex)
 
+	# If no bpf was attached to this container, return
+	if container_id == None or container_id not in glob_cid_to_bpf_obj_map.keys():
+		return
+
+	print(f"detaching bpf for {container_id}")
+
 	container_cgroup2_path = get_cgroup2_path(container_id)
-	bpf = attach.getBPF()
+	bpf = glob_cid_to_bpf_obj_map[container_id]
 
 	try:
 		attach.sock(bpf, container_cgroup2_path, attach.DETACH)
 	except:
-		CouldNotAttachBPFException("could not detach sock, maybe sock is not attached for this cgroup2 path")
-		return
+		pass
+	
+	try:
+		attach.kprobe(bpf, attach.DETACH)
+	except:
+		pass
+
+	# The container has stopped, remove the cache entries
+	del glob_ifindex_to_cid_map[ifindex]
+	del glob_cid_to_bpf_obj_map[container_id]
 
 # Listens for any new entries in the event queue
 # For EVENT_STATE_UP, attaches filter to the container
