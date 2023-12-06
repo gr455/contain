@@ -1,5 +1,7 @@
 # Contain
-BPF based per-process per-container egress filter
+BPF based per-process per-container egress filter.
+
+Filters outgoing traffic from containers based on the container and the process the traffic originated from. Once containd is running, it automatically detects any new containers.
 
 ## Run
 
