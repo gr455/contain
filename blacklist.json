@@ -1,12 +1,16 @@
 [
-	{
-		"process": "curl",
-		"disallow": [
+	{	
+		"container_name": "curler",
+		"policy": [
 			{
-				"cidr4": "1.1.1.0/24",
-				"ports": [80, 443]
+				"process": "curl",
+				"disallow": [
+					{
+						"cidr4": "1.1.1.0/24",
+						"ports": [80, 443]
+					}
+				]
 			}
 		]
 	}
-
 ]

@@ -1,4 +1,4 @@
-import attach
+import attach.attach as attach
 import docker
 import click
 import json

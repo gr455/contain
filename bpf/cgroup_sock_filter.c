@@ -10,6 +10,23 @@
 #define PORT_COUNT_PER_IP_MAX 5
 #define TOTSIZE ( EXECNAMES_COUNT_MAX * IP_COUNT_PER_EXECNAME_MAX * PORT_COUNT_PER_IP_MAX )
 
+/**
+ * 
+ * This BPF file consists of 2 programs
+ *  - A PROG_TYPE_CGROUP_SKB to forward or drop packets based on allow list
+ *  - A kretprobe to map a process to socket file struct
+ * 
+ * PROG_TYPE_CGROUP_SKB is used to forward or drop packets through the ip_finish_output() function.
+ * A BPF handler function attached to CGROUP_SKB is expected to return 1 (SOCK_PASS) to forward.
+ * Any other return value will result in an EPERM propagating an EPERM to ip_finish_output(). This
+ * BPF program, however does not get process context and cannot access process comm.
+ * 
+ * Kretprobe pushes a map between process comm and file struct. This file struct can be accessed
+ * through the sock object in the CGROUP_SKB BPF program. So this map helps CGROUP_SKB to access
+ * process comm.
+ * 
+ * */
+
 struct in6_addr_u64 {
     __u64 addr_hi;
     __u64 addr_lo;

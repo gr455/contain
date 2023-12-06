@@ -1,13 +1,17 @@
-import attach
-import attach_monitor_ifprobe
+import attach.attach as attach
+import attach.attach_monitor_ifprobe as attach_monitor_ifprobe
 import time
+import json
 import docker
 import subprocess
 
 IFINDEX_EVTQ_NAME = "peer_ifindex_evtq"
+DOCKERVETH_SCRIPT_PATH = "./scripts/dockerveth.sh"
 
 IFPROBE_EVENT_STATE_DOWN = 0
 IFPROBE_EVENT_STATE_UP = 1
+
+glob_container_name_to_policy_map = {}
 
 class NonFatalExternalScriptException(Exception):
 	"Raised when external script exits with a non-zero exit code non-fatally"
@@ -26,7 +30,7 @@ def get_cgroup2_path(container_id):
 
 # Maps container id to bpf object
 glob_cid_to_bpf_obj_map = {}
-# Maps ifindex to container id. Required for detaching since then the container is not running 
+# Maps ifindex to container id, name. Required for detaching since then the container is not running 
 # and so, ifindex does not exist in kernel
 glob_ifindex_to_cid_map = {}
 
@@ -47,13 +51,19 @@ def do_detach_monitor_ifprobe(ifprobe_bpf):
 	
 	return ifprobe_bpf
 
-def check_ignore_container(container_id):
-	return False
+# TODO: smart get policy for k8s, maybe substring?
+def get_policy(container_id, container_name):
+	if container_name not in glob_container_name_to_policy_map:
+		return None
 
+	print(f"SETTING POLICY FOR {container_name} : ", glob_container_name_to_policy_map[container_name])
+	return glob_container_name_to_policy_map[container_name]
+
+# Returns ifindex of container's veth's netdevice
 def get_ifindex_for_container(container_id):
 	# Call shell script to do exactly that
 	# print("CID", container_id, type(container_id))
-	proc = subprocess.Popen(["./scripts/dockerveth.sh", container_id], stdout = subprocess.PIPE, stderr = subprocess.PIPE)
+	proc = subprocess.Popen([DOCKERVETH_SCRIPT_PATH, container_id], stdout = subprocess.PIPE, stderr = subprocess.PIPE)
 	op, err = proc.communicate()
 
 	if proc.returncode != 0:
@@ -61,41 +71,47 @@ def get_ifindex_for_container(container_id):
 
 	return op
 
-def get_container_id_for_ifindex(ifindex):
-	# If ifindex already exists with us, return it
+# Gets container given ifindex of veth's netdevice
+def get_container_id_and_name_for_ifindex(ifindex):
+	# If ifindex is cached, return it
 	if ifindex in glob_ifindex_to_cid_map.keys():
 		return glob_ifindex_to_cid_map[ifindex]
 
 	# Get all running containers
 	client = docker.from_env()
 
-	container_ids = [container.id for container in client.containers.list(all = True)]
+	container_names_ids = [(container.id, container.name) for container in client.containers.list(all = True)]
 
-	for cid in container_ids:
+	for cid, cname in container_names_ids:
 		try:
 			this_ifindex = int(get_ifindex_for_container(cid))
 			if this_ifindex == ifindex:
 				# Cache and return
-				glob_ifindex_to_cid_map[ifindex] = cid
-				return cid
+				glob_ifindex_to_cid_map[ifindex] = (cid, cname)
+				return (cid, cname)
 		except NonFatalExternalScriptException:
 			pass
 		except Exception as e:
 			print(f"Exception: {e}")
 			continue
 
-	return None
+	return (None, None)
 
+# Attach socket filter to cgroup of container with veth device ifindex if the container
+# policy is available. Else ignore.
 def attach_sock_filter_or_not(ifindex):
-	container_id = get_container_id_for_ifindex(ifindex)
+	container_id, container_name = get_container_id_and_name_for_ifindex(ifindex)
 
-	# If container not in the policy, ignore
-	if check_ignore_container(container_id):
+	container_policy = get_policy(container_id, container_name)
+	
+	# If container does not have any policies, return	
+	if container_policy == None:
 		return
 	
 	container_cgroup2_path = get_cgroup2_path(container_id)
-	bpf = attach.getBPF()
 
+	bpf = attach.getBPF()
+	attach.setDisallowHash(bpf, container_policy)
 	glob_cid_to_bpf_obj_map[container_id] = bpf
 
 	print(f"attaching bpf for {container_id}")
@@ -107,8 +123,9 @@ def attach_sock_filter_or_not(ifindex):
 		CouldNotAttachBPFException("could not attach BPF programs")
 		return
 
+# Detach socket filter
 def detach_sock_filter(ifindex):
-	container_id = get_container_id_for_ifindex(ifindex)
+	container_id, container_name = get_container_id_and_name_for_ifindex(ifindex)
 
 	# If no bpf was attached to this container, return
 	if container_id == None or container_id not in glob_cid_to_bpf_obj_map.keys():
@@ -136,12 +153,11 @@ def detach_sock_filter(ifindex):
 # Listens for any new entries in the event queue
 # For EVENT_STATE_UP, attaches filter to the container
 # conditionally. For EVENT_STATE_DOWN detaches filter.
-def listenForEvt(ifprobe_bpf):
+def listen_for_evt(ifprobe_bpf):
 	while True:
 		evt = None
 		try:
 			evt = ifprobe_bpf[IFINDEX_EVTQ_NAME].pop()
-			# print(evt.ifindex, evt.event_state)
 		except KeyError:
 			# yield cpu
 			time.sleep(0.0001)
@@ -154,10 +170,29 @@ def listenForEvt(ifprobe_bpf):
 			detach_sock_filter(evt.ifindex)
 
 
+# Read policy file and return map of container->policy
+def read_policy_file(filepath):
+	all_policies = None
+	policy_map = {}
+
+	with open(filepath, "r") as policy_file:
+		all_policies = json.load(policy_file)
+	
+
+	for container_policies in all_policies:
+		container_name = container_policies["container_name"]
+		policy_map[container_name] = container_policies["policy"]
+
+	return policy_map
+
+
 if __name__ == '__main__':
+	b = None
 	try:
 		b = do_attach_monitor_ifprobe(None)
-		listenForEvt(b)
+		glob_container_name_to_policy_map = read_policy_file("blacklist.json")
+		listen_for_evt(b)
+
 	except KeyboardInterrupt:
 		print("Detaching ifprobe monitor")
-		do_detach_monitor_ifprobe(b)
+		if b != None: do_detach_monitor_ifprobe(b)

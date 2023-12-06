@@ -42,7 +42,7 @@
  *  - Traces creation of veth link
  *  - Stores the reference to netdevice struct with kprobe to register_netdevice()
  *  - Reads ifindex from netdevice with kretprobe to register_netdevice()
- *  - Also traces device unregistration and pushes the relevent ifindex to down queue
+ *  - Also traces device unregistration and pushes the relevent ifindex to evt queue
  * 
  * 
  * Refer https://github.com/Gui774ume/network-security-probe 
