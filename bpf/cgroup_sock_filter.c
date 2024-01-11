@@ -1,8 +1,9 @@
 #include <net/sock.h>
 #include <net/inet_sock.h>
+#include <linux/ip.h>
 
+#define SOCK_DROP 0
 #define SOCK_PASS 1
-#define SOCK_EPERM 0
 
 #define PROC_EXECNAME_MAX 16
 #define EXECNAMES_COUNT_MAX 10
@@ -85,6 +86,8 @@ static bool ip_in_net(__u32 candidate_ip, __u32 net_ip, __u32 cidr4_mask) {
 
 // Socket filter BPF program
 int sock_filter(struct __sk_buff *bpf_skb) {
+    if (bpf_skb == NULL) return SOCK_PASS;
+
     struct sk_buff skb;
 
     // Base addresses for __sk_buff and sk_buff are the same, so reading
@@ -94,13 +97,6 @@ int sock_filter(struct __sk_buff *bpf_skb) {
 
     // Read sock object from kernel
     struct sock *sk = skb.sk;
-
-    // Read port
-    __u64 dport;
-    succ = bpf_probe_read_kernel(&dport, (__u32)sizeof(__u64), &sk->sk_dport);
-    if (succ != 0) return SOCK_PASS;
-
-    dport = htons(dport);
 
     // Read socket object
     struct socket *sock;
@@ -117,17 +113,23 @@ int sock_filter(struct __sk_buff *bpf_skb) {
     succ = bpf_probe_read_kernel(&f_owner, (__u32)sizeof(struct fown_struct), &file->f_owner);
     if (succ != 0) return SOCK_PASS;
 
+    // sk->daddr and such are not populated when using raw sockets. Need to obtain
+    // daddr from iphdr.
+    struct iphdr *iph = (struct iphdr *)skb_network_header(&skb);
+
+    __be32 daddr;
+    succ = bpf_probe_read_kernel(&daddr, (__be32)sizeof(__be32), &iph->daddr);
+    if (succ != 0) return SOCK_PASS;
 
     if (bpf_skb->sk == 0) return SOCK_PASS;
 
-    // Get IP and port fields. Take care of endianness
+    // Host and port converted to network byte order
     __u32 port = htons(bpf_skb->sk->dst_port);
-    __u32 ip = htonl(bpf_skb->sk->dst_ip4);
+    __u32 ip = htonl(daddr);
 
     // Lookup for current process name and check if the process name has a filter
     struct Execname *e = sockfile_pname.lookup(&file);
     if (e == NULL) return SOCK_PASS;
-
 
     // Check for match in arrays
     int i = 0;
@@ -150,15 +152,15 @@ int sock_filter(struct __sk_buff *bpf_skb) {
 
                 if (*bl_port == port) {
                     // Matched
-                    bpf_trace_printk("BLOCKED for %s%s connection to %d", &candidate_exec->execname_hi, &candidate_exec->execname_lo, ip);
-                    return SOCK_EPERM;
+                    return SOCK_PASS;
                 }
             }
         }
         i++;
     }
 
-    return SOCK_PASS;
+    bpf_trace_printk("BLOCKED for %s%s connection to %d", &e->execname_lo, &e->execname_hi, ip);
+    return SOCK_DROP;
 }
 
 

@@ -119,6 +119,7 @@ def attach_sock_filter_or_not(ifindex):
 	try:
 		attach.kprobe(bpf)
 		attach.sock(bpf, container_cgroup2_path)
+		bpf.trace_print()
 	except:
 		CouldNotAttachBPFException("could not attach BPF programs")
 		return
@@ -191,6 +192,7 @@ if __name__ == '__main__':
 	try:
 		b = do_attach_monitor_ifprobe(None)
 		glob_container_name_to_policy_map = read_policy_file("blacklist.json")
+		print("Attached.")
 		listen_for_evt(b)
 
 	except KeyboardInterrupt:

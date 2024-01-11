@@ -33,11 +33,9 @@ class ExecName:
 def sock(b, cgroup2_path, attach=ATTACH):
     def detach_sock(fd, func):
         b.detach_func(func, fd, BPFAttachType.CGROUP_INET_EGRESS)
-        b.detach_func(func, fd, BPFAttachType.CGROUP_INET_INGRESS)
 
     def attach_sock(fd, func):
         b.attach_func(func, fd, BPFAttachType.CGROUP_INET_EGRESS)
-        b.attach_func(func, fd, BPFAttachType.CGROUP_INET_INGRESS)
 
     func = b.load_func("sock_filter", BPFProgType.CGROUP_SKB)
     fd = os.open(cgroup2_path, os.O_RDONLY)
