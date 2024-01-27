@@ -111,7 +111,7 @@ def attach_sock_filter_or_not(ifindex):
 	container_cgroup2_path = get_cgroup2_path(container_id)
 
 	bpf = attach.getBPF()
-	attach.setDisallowHash(bpf, container_policy)
+	attach.setAllowHash(bpf, container_policy)
 	glob_cid_to_bpf_obj_map[container_id] = bpf
 
 	print(f"attaching bpf for {container_id}")
@@ -191,7 +191,7 @@ if __name__ == '__main__':
 	b = None
 	try:
 		b = do_attach_monitor_ifprobe(None)
-		glob_container_name_to_policy_map = read_policy_file("blacklist.json")
+		glob_container_name_to_policy_map = read_policy_file("allowlist.json")
 		print("Attached.")
 		listen_for_evt(b)
 

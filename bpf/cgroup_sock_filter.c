@@ -40,17 +40,18 @@ struct Execname {
 };
 
 // Array of execnames
-BPF_ARRAY(blacklist_execname, struct Execname, TOTSIZE);
+BPF_ARRAY(allowlist_execname, struct Execname, TOTSIZE);
 // Array of ips
-BPF_ARRAY(blacklist_ip, __u32, TOTSIZE);
+BPF_ARRAY(allowlist_ip, __u32, TOTSIZE);
 // Array of CIDRs
-BPF_ARRAY(blacklist_cidr_for_ip, __u32, TOTSIZE);
+BPF_ARRAY(allowlist_cidr_for_ip, __u32, TOTSIZE);
 // Array of ports
-BPF_ARRAY(blacklist_port_for_ip, __u32, TOTSIZE);
+BPF_ARRAY(allowlist_port_for_ip, __u32, TOTSIZE);
 
 // kprobe pushes to sockfile execname to this map
 BPF_HASH(sockfile_pname, struct file *, struct Execname);
 
+// String copy
 static unsigned int bpf_strcpy(char *dst, char *src) {
     int MAX_CPY_LEN = PROC_EXECNAME_MAX;
 
@@ -65,6 +66,7 @@ static unsigned int bpf_strcpy(char *dst, char *src) {
     return i - 1;
 }
 
+// String compare
 static bool bpf_strcmp(char *s1, char *s2) {
     int MAX_STR_LEN = PROC_EXECNAME_MAX;
 
@@ -136,18 +138,18 @@ int sock_filter(struct __sk_buff *bpf_skb) {
     #pragma clang loop unroll(full)
     while (i < TOTSIZE) {
         int idx = i;
-        struct Execname *candidate_exec = (struct Execname *) blacklist_execname.lookup(&idx);
+        struct Execname *candidate_exec = (struct Execname *) allowlist_execname.lookup(&idx);
         if (candidate_exec == NULL) { i++; continue; }
 
         if (candidate_exec->execname_hi == e->execname_hi && candidate_exec->execname_lo == e->execname_lo){
             // Found execname, check ip4 cidr
-            __u32 *bl_ip = blacklist_ip.lookup(&idx);
-            __u32 *cidr4_mask = blacklist_cidr_for_ip.lookup(&idx);
+            __u32 *bl_ip = allowlist_ip.lookup(&idx);
+            __u32 *cidr4_mask = allowlist_cidr_for_ip.lookup(&idx);
             if (bl_ip == NULL || cidr4_mask == NULL) { i++; continue; }
 
             if (ip_in_net(ip, *bl_ip, *cidr4_mask)) {
                 // IP found, check port
-                __u32 *bl_port = blacklist_port_for_ip.lookup(&idx);
+                __u32 *bl_port = allowlist_port_for_ip.lookup(&idx);
                 if (bl_port == NULL) { i++; continue; }
 
                 if (*bl_port == port) {

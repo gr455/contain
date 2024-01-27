@@ -16,10 +16,10 @@ PORT_COUNT_PER_IP_MAX = 5
 TOTSIZE = ( EXECNAMES_COUNT_MAX * IP_COUNT_PER_EXECNAME_MAX * PORT_COUNT_PER_IP_MAX )
 
 
-IP_HASHNAME = "blacklist_ip"
-EXEC_ARRAYNAME = "blacklist_execname"
-CIDR_ARRAYNAME = "blacklist_cidr_for_ip"
-PORT_ARRAYNAME = "blacklist_port_for_ip"
+IP_HASHNAME = "allowlist_ip"
+EXEC_ARRAYNAME = "allowlist_execname"
+CIDR_ARRAYNAME = "allowlist_cidr_for_ip"
+PORT_ARRAYNAME = "allowlist_port_for_ip"
 
 filter_path = "./bpf/cgroup_sock_filter.c"
 
@@ -53,6 +53,7 @@ def kprobe(b, attach=ATTACH):
     if attach: attach_kpr()
     else: detach_kpr()
 
+# Return a BPF object with bpf bytecode compiled from source at filter_path
 def getBPF():
     program = ""
     with open(filter_path, "r") as filter_file:
@@ -61,47 +62,49 @@ def getBPF():
     b = BPF(text=program)
     return b
 
-def setDisallowHash(b, policyDict):
-    blacklistExecname, blacklistIP, blacklistCIDRForIP, blacklistPortForIP = formatDictToArrays(policyDict)
-    blacklistExecname = execnameArrayStringToObject(blacklistExecname, b['blacklist_execname'].Leaf)
-    blacklistIP = ipArrayStringToInt(blacklistIP)
+# Set BPF_HASH for dis
+def setAllowHash(b, policyDict):
+    allowlistExecname, allowlistIP, allowlistCIDRForIP, allowlistPortForIP = formatDictToArrays(policyDict)
+    allowlistExecname = execnameArrayStringToObject(allowlistExecname, b['allowlist_execname'].Leaf)
+    allowlistIP = ipArrayStringToInt(allowlistIP)
 
     # print(type(b[DISALLOW_IP_HASHNAME]))
     # print(policyDict)
-    for i in range(len(blacklistExecname)):
-        b[EXEC_ARRAYNAME][i] = blacklistExecname[i]
-        b[IP_HASHNAME][i] = blacklistIP[i]
-        b[CIDR_ARRAYNAME][i] = blacklistCIDRForIP[i]
-        b[PORT_ARRAYNAME][i] = blacklistPortForIP[i]
+    for i in range(len(allowlistExecname)):
+        b[EXEC_ARRAYNAME][i] = allowlistExecname[i]
+        b[IP_HASHNAME][i] = allowlistIP[i]
+        b[CIDR_ARRAYNAME][i] = allowlistCIDRForIP[i]
+        b[PORT_ARRAYNAME][i] = allowlistPortForIP[i]
 
     
-
+# Part of formatting from policyDict -> BPF_HASH
 def formatDictToArrays(policyDict):
-    blacklistExecname = []
-    blacklistIP = []
-    blacklistCIDRForIP = []
-    blacklistPortForIP = []
+    allowlistExecname = []
+    allowlistIP = []
+    allowlistCIDRForIP = []
+    allowlistPortForIP = []
 
     for process in policyDict:
-        for ipPolicy in process['disallow']:
+        for ipPolicy in process['allow']:
             for port in ipPolicy['ports']:
-                blacklistExecname.append(process['process'])
-                blacklistIP.append(ipPolicy['cidr4'].split('/')[0])
-                blacklistCIDRForIP.append(ctypes.c_uint32(int(ipPolicy['cidr4'].split('/')[1])))
-                blacklistPortForIP.append(ctypes.c_uint32(port))
+                allowlistExecname.append(process['process'])
+                allowlistIP.append(ipPolicy['cidr4'].split('/')[0])
+                allowlistCIDRForIP.append(ctypes.c_uint32(int(ipPolicy['cidr4'].split('/')[1])))
+                allowlistPortForIP.append(ctypes.c_uint32(port))
 
-    return (blacklistExecname, blacklistIP, blacklistCIDRForIP, blacklistPortForIP)
+    return (allowlistExecname, allowlistIP, allowlistCIDRForIP, allowlistPortForIP)
 
-def ipArrayStringToInt(blacklistIP):
-    for i in range(len(blacklistIP)):
-        blacklistIP[i] = ctypes.c_uint32(int(ipaddress.IPv4Address(blacklistIP[i])))
-    return blacklistIP
+def ipArrayStringToInt(allowlistIP):
+    for i in range(len(allowlistIP)):
+        allowlistIP[i] = ctypes.c_uint32(int(ipaddress.IPv4Address(allowlistIP[i])))
+    return allowlistIP
 
-def execnameArrayStringToObject(blacklistExecname, ExecNameClass):
-    for i in range(len(blacklistExecname)):
-        blacklistExecname[i] = execStringToExecName(blacklistExecname[i], ExecNameClass)
-    return blacklistExecname
+def execnameArrayStringToObject(allowlistExecname, ExecNameClass):
+    for i in range(len(allowlistExecname)):
+        allowlistExecname[i] = execStringToExecName(allowlistExecname[i], ExecNameClass)
+    return allowlistExecname
 
+# Convert from string to ExecNameClass type
 def execStringToExecName(execString, ExecNameClass):
     if len(execString) > 16:
         execString = execString[:16]
@@ -119,7 +122,7 @@ if __name__ == '__main__':
 
     b = getBPF()
 
-    # b["blacklist_exec"]
+    # b["allowlist_exec"]
 
     try:
         kprobe(b)

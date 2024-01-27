@@ -18,8 +18,8 @@ def info(message):
 @click.option("-n", type = str, help = "Pass container name")
 @click.option("-d", is_flag = True, help = "Detach trace print from terminal")
 @click.argument("action")
-@click.argument("blacklistfile")
-def cli(i, n, d, action, blacklistfile):
+@click.argument("allowlistfile")
+def cli(i, n, d, action, allowlistfile):
 	if not action:
 		fatal("No action passed")
 	if action != "attach" and action != "detach":
@@ -44,15 +44,15 @@ def cli(i, n, d, action, blacklistfile):
 	# create bcc bpf object
 	b = attach.getBPF()
 	
-	disallowDict = {}
+	allowDict = {}
 
-	# read blacklist file
-	with open(blacklistfile, "r") as disallowFile:
-		disallowDict = json.load(disallowFile)
-	print(disallowDict)
+	# read allowlist file
+	with open(allowlistfile, "r") as disallowFile:
+		allowDict = json.load(disallowFile)
+	print(allowDict)
 
-	# set disallow bpf hash
-	attach.setDisallowHash(b, disallowDict)
+	# set allow bpf hash
+	attach.setAllowHash(b, allowDict)
 	# return
 	# detach existing handlers
 	info("Detatching existing handlers...")
