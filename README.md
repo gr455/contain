@@ -7,7 +7,7 @@ Filters outgoing traffic from containers based on the container and the process 
 
 **Requires cgroup v2**
 
-1. Update `blacklist.json` with your own disallow list.
+1. Update `blacklist.json` with your own allow list.
 
 2. To start Contain daemon, run
 ```
@@ -16,7 +16,7 @@ python3 containd.py
 
 When the daemon is running, it detects any newly started containers and applies policies to them.
 
-Once started, the disallow list
+Once started, the allow list
 
 ```json
 [
@@ -25,7 +25,7 @@ Once started, the disallow list
 		"policy": [
 			{
 				"process": "curl", // Only add a single object per process, add one/multiple objects per container
-				"disallow": [
+				"allow": [
 					{
 						"cidr4": "1.1.1.0/24",
 						"ports": [80, 443]
@@ -44,4 +44,4 @@ Gives
 
 This BPF filter uses `BPF_PROG_TYPE_CGROUP_SKB` and a kretprobe to kernel function `net/socket/sock_alloc_file` for per-process, per-container socket filtering.
 
-Tested on Linux 5.19.0-40-generic
+Tested on Linux 5.19.0 - 6.2.0
